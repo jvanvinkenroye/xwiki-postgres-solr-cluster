@@ -1,0 +1,372 @@
+# XWiki High Availability Cluster Configuration
+# PostgreSQL + Solr + Multiple XWiki Nodes + Load Balancer
+# See: clustering/README.md for setup instructions
+
+version: '3.8'
+
+networks:
+  xwiki-cluster-network:
+    driver: bridge
+    name: xwiki-cluster-network
+
+volumes:
+  # PostgreSQL data persistence
+  postgres-data:
+    name: xwiki-cluster-postgres-data
+
+  # Shared XWiki permanent directory (required for clustering)
+  # In production, use NFS or other shared storage
+  xwiki-data-shared:
+    name: xwiki-cluster-data-shared
+
+  # Solr index data persistence
+  solr-data:
+    name: xwiki-cluster-solr-data
+
+services:
+  # PostgreSQL Database Service (Shared by all nodes)
+  db:
+    image: postgres:17
+    container_name: xwiki-cluster-db
+    restart: unless-stopped
+
+    networks:
+      - xwiki-cluster-network
+
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+    environment:
+      POSTGRES_ROOT_PASSWORD: ${POSTGRES_ROOT_PASSWORD:-xwiki}
+      POSTGRES_USER: ${POSTGRES_USER:-xwiki}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-xwiki}
+      POSTGRES_DB: ${POSTGRES_DB:-xwiki}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale-provider=builtin --locale=C.UTF-8"
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xwiki"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+    # Production: Tune PostgreSQL for multiple connections
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "effective_cache_size=1GB"
+      - "-c"
+      - "maintenance_work_mem=128MB"
+      - "-c"
+      - "checkpoint_completion_target=0.9"
+      - "-c"
+      - "wal_buffers=16MB"
+      - "-c"
+      - "default_statistics_target=100"
+
+  # Solr Initialization Service
+  # Extracts XWiki Solr configuration before Solr starts
+  solr-init:
+    image: alpine:latest
+    container_name: xwiki-solr-init
+    restart: "no"  # Runs once, then exits
+
+    volumes:
+      # Source: XWiki Solr configuration archive (ZIP/JAR)
+      - ../solr-init:/source:ro
+
+      # Target: Shared volume with Solr
+      - solr-data:/target
+
+    # Idempotent: Only extracts if core doesn't exist yet
+    command: |
+      sh -c '
+        CORE_DIR="/target/data/xwiki"
+
+        # Check if already extracted
+        if [ -d "$$CORE_DIR" ] && [ -f "$$CORE_DIR/core.properties" ]; then
+          echo "✅ Solr core already exists at $$CORE_DIR"
+          exit 0
+        fi
+
+        echo "📦 Installing unzip..."
+        apk add --no-cache unzip
+
+        echo "📂 Creating core directory..."
+        mkdir -p "$$CORE_DIR"
+
+        echo "📦 Extracting Solr configuration..."
+        cd /source
+        ARCHIVE=$$(find . -type f \( -name "*.zip" -o -name "*.jar" \) | head -1)
+
+        if [ -z "$$ARCHIVE" ]; then
+          echo "❌ ERROR: No Solr configuration archive found in /source!"
+          echo "Expected: xwiki-platform-search-solr-server-*.zip or *.jar"
+          exit 1
+        fi
+
+        echo "Found archive: $$ARCHIVE"
+        unzip -o "$$ARCHIVE" -d "$$CORE_DIR"
+
+        echo "🔧 Setting permissions for Solr user (8983:8983)..."
+        chown -R 8983:8983 "$$CORE_DIR"
+
+        echo "✅ Solr configuration extracted successfully!"
+        echo "Core structure:"
+        ls -la "$$CORE_DIR"
+      '
+
+  # Apache Solr Search Service (Shared by all nodes)
+  solr:
+    image: solr:9  # Official Solr image (no custom build needed!)
+    container_name: xwiki-cluster-solr
+    restart: unless-stopped
+
+    # Wait for solr-init to complete
+    depends_on:
+      solr-init:
+        condition: service_completed_successfully
+
+    networks:
+      - xwiki-cluster-network
+
+    volumes:
+      # Only the Solr data volume (core is extracted by solr-init)
+      - solr-data:/var/solr
+
+    environment:
+      SOLR_HEAP: ${SOLR_HEAP:-1g}
+      # Production: Enable Solr authentication
+      # SOLR_AUTH_TYPE: basic
+      # SOLR_AUTHENTICATION_OPTS: "-Dbasicauth=solr:SolrRocks"
+
+    # Only expose for debugging (remove in production)
+    ports:
+      - "8983:8983"
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8983/solr/xwiki/admin/ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # XWiki Node 1
+  web1:
+    image: xwiki:${XWIKI_VERSION:-stable-postgres-tomcat}
+    container_name: xwiki-cluster-node1
+    hostname: xwiki-node1
+    restart: unless-stopped
+
+    depends_on:
+      db:
+        condition: service_healthy
+      solr:
+        condition: service_healthy
+
+    networks:
+      - xwiki-cluster-network
+
+    volumes:
+      # Shared permanent directory (CRITICAL for clustering)
+      - xwiki-data-shared:/usr/local/xwiki
+
+      # JGroups clustering configuration
+      - ./jgroups/tcp.xml:/usr/local/tomcat/webapps/ROOT/WEB-INF/observation/remote/jgroups/tcp.xml:ro
+
+      # Optional: Custom configurations
+      # - ./config/xwiki.properties:/usr/local/tomcat/webapps/ROOT/WEB-INF/xwiki.properties:ro
+
+    environment:
+      # Database connection
+      DB_USER: ${POSTGRES_USER:-xwiki}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-xwiki}
+      DB_DATABASE: ${POSTGRES_DB:-xwiki}
+      DB_HOST: xwiki-cluster-db
+
+      # Solr configuration
+      INDEX_HOST: xwiki-cluster-solr
+      INDEX_PORT: 8983
+
+      # JVM options for clustering
+      JAVA_OPTS: >-
+        -Xmx2048m
+        -Xms1024m
+        -XX:+UseG1GC
+        -XX:MaxGCPauseMillis=200
+        -Dfile.encoding=UTF-8
+        -Djava.awt.headless=true
+        -Djgroups.bind_addr=xwiki-node1
+        -Djgroups.tcp.address=xwiki-node1
+
+    # Do NOT expose port externally - use load balancer
+    expose:
+      - "8080"
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  # XWiki Node 2
+  web2:
+    image: xwiki:${XWIKI_VERSION:-stable-postgres-tomcat}
+    container_name: xwiki-cluster-node2
+    hostname: xwiki-node2
+    restart: unless-stopped
+
+    depends_on:
+      db:
+        condition: service_healthy
+      solr:
+        condition: service_healthy
+      web1:
+        condition: service_healthy
+
+    networks:
+      - xwiki-cluster-network
+
+    volumes:
+      # Same shared permanent directory
+      - xwiki-data-shared:/usr/local/xwiki
+
+      # JGroups clustering configuration
+      - ./jgroups/tcp.xml:/usr/local/tomcat/webapps/ROOT/WEB-INF/observation/remote/jgroups/tcp.xml:ro
+
+    environment:
+      DB_USER: ${POSTGRES_USER:-xwiki}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-xwiki}
+      DB_DATABASE: ${POSTGRES_DB:-xwiki}
+      DB_HOST: xwiki-cluster-db
+
+      INDEX_HOST: xwiki-cluster-solr
+      INDEX_PORT: 8983
+
+      JAVA_OPTS: >-
+        -Xmx2048m
+        -Xms1024m
+        -XX:+UseG1GC
+        -XX:MaxGCPauseMillis=200
+        -Dfile.encoding=UTF-8
+        -Djava.awt.headless=true
+        -Djgroups.bind_addr=xwiki-node2
+        -Djgroups.tcp.address=xwiki-node2
+
+    expose:
+      - "8080"
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  # XWiki Node 3 (Optional - scale as needed)
+#   web3:
+#     image: xwiki:${XWIKI_VERSION:-stable-postgres-tomcat}
+#     container_name: xwiki-cluster-node3
+#     hostname: xwiki-node3
+#     restart: unless-stopped
+# 
+#     depends_on:
+#       db:
+#         condition: service_healthy
+#       solr:
+#         condition: service_healthy
+#       web1:
+#         condition: service_healthy
+# 
+#     networks:
+#       - xwiki-cluster-network
+# 
+#     volumes:
+#       - xwiki-data-shared:/usr/local/xwiki
+#       - ./jgroups/tcp.xml:/usr/local/tomcat/webapps/ROOT/WEB-INF/observation/remote/jgroups/tcp.xml:ro
+# 
+#     environment:
+#       DB_USER: ${POSTGRES_USER:-xwiki}
+#       DB_PASSWORD: ${POSTGRES_PASSWORD:-xwiki}
+#       DB_DATABASE: ${POSTGRES_DB:-xwiki}
+#       DB_HOST: xwiki-cluster-db
+# 
+#       INDEX_HOST: xwiki-cluster-solr
+#       INDEX_PORT: 8983
+# 
+#       JAVA_OPTS: >-
+#         -Xmx2048m
+#         -Xms1024m
+#         -XX:+UseG1GC
+#         -XX:MaxGCPauseMillis=200
+#         -Dfile.encoding=UTF-8
+#         -Djava.awt.headless=true
+#         -Djgroups.bind_addr=xwiki-node3
+#         -Djgroups.tcp.address=xwiki-node3
+# 
+#     expose:
+#       - "8080"
+# 
+#     healthcheck:
+#       test: ["CMD-SHELL", "curl -f http://localhost:8080/ || exit 1"]
+#       interval: 30s
+#       timeout: 10s
+#       retries: 5
+#       start_period: 120s
+
+    # Optional: Disable this node by default (scale on demand)
+    # profiles:
+    #   - scale
+
+  # Nginx Load Balancer
+  loadbalancer:
+    image: nginx:1.27-alpine
+    container_name: xwiki-cluster-lb
+    restart: unless-stopped
+
+    depends_on:
+      web1:
+        condition: service_healthy
+      web2:
+        condition: service_healthy
+
+    networks:
+      - xwiki-cluster-network
+
+    ports:
+      # Main access point
+      - "${XWIKI_PORT:-8080}:80"
+      # Nginx status page
+      - "${NGINX_STATUS_PORT:-8081}:8080"
+
+    volumes:
+      # Main nginx configuration
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Upstream (backend servers) configuration
+      - ./nginx/upstream.conf:/etc/nginx/conf.d/upstream.conf:ro
+      # Virtual host configuration
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      # Status page configuration
+      - ./nginx/status.conf:/etc/nginx/conf.d/status.conf:ro
+      # Log directory (optional - for persistent logs)
+      # - ./logs/nginx:/var/log/nginx
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    # Optional: Resource limits
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 512M
+    #     reservations:
+    #       memory: 256M

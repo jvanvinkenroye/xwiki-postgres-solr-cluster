@@ -1,0 +1,136 @@
+<!--
+  JGroups TCP-based cluster configuration for XWiki
+
+  This configuration uses TCP for cluster communication (better for Docker)
+  instead of UDP multicast which has issues in containerized environments.
+
+  See: https://www.xwiki.org/xwiki/bin/view/Documentation/AdminGuide/Clustering/
+-->
+<config xmlns="urn:org:jgroups"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="urn:org:jgroups http://www.jgroups.org/schema/jgroups.xsd">
+
+    <!--
+      TCP: Uses TCP for cluster communication
+      - bind_addr: IP address to bind to (set via -Djgroups.bind_addr)
+      - bind_port: Port to bind to (7800 is default)
+      - recv_buf_size / send_buf_size: Socket buffer sizes
+      - thread_pool: Thread pool configuration for handling messages
+    -->
+    <TCP bind_addr="${jgroups.bind_addr:xwiki-node1}"
+         bind_port="7800"
+         recv_buf_size="5M"
+         send_buf_size="1M"
+         max_bundle_size="64K"
+         sock_conn_timeout="300"
+         thread_pool.min_threads="0"
+         thread_pool.max_threads="20"
+         thread_pool.keep_alive_time="30000"/>
+
+    <!--
+      TCPPING: TCP-based discovery protocol
+
+      Statically define cluster members (all XWiki nodes).
+      In production, consider using:
+      - JDBC_PING (database-based discovery)
+      - DNS_PING (DNS-based discovery)
+      - KUBE_PING (Kubernetes-based discovery)
+    -->
+    <TCPPING initial_hosts="xwiki-cluster-node1[7800],xwiki-cluster-node2[7800],xwiki-cluster-node3[7800]"
+             port_range="0"
+             timeout="3000"/>
+
+    <!--
+      MERGE3: Handles network partitions
+      Automatically merges sub-clusters that may form due to network issues
+    -->
+    <MERGE3 min_interval="10000"
+            max_interval="30000"/>
+
+    <!--
+      FD_SOCK: Failure detection using TCP sockets
+      Detects when cluster members fail or become unreachable
+    -->
+    <FD_SOCK/>
+
+    <!--
+      FD_ALL: Heartbeat-based failure detection
+      Each member pings all others to detect failures
+    -->
+    <FD_ALL timeout="12000"
+            interval="3000"
+            timeout_check_interval="3000"/>
+
+    <!--
+      VERIFY_SUSPECT: Verifies suspected failures before removing from cluster
+      Reduces false positives in failure detection
+    -->
+    <VERIFY_SUSPECT timeout="1500"/>
+
+    <!--
+      pbcast.NAKACK2: Reliable multicast protocol
+      Ensures messages are delivered reliably to all cluster members
+    -->
+    <pbcast.NAKACK2 xmit_interval="500"
+                    xmit_table_num_rows="100"
+                    xmit_table_msgs_per_row="2000"
+                    xmit_table_max_compaction_time="30000"
+                    use_mcast_xmit="false"
+                    discard_delivered_msgs="true"/>
+
+    <!--
+      UNICAST3: Reliable unicast protocol for point-to-point communication
+    -->
+    <UNICAST3 xmit_interval="500"
+              xmit_table_num_rows="100"
+              xmit_table_msgs_per_row="2000"
+              xmit_table_max_compaction_time="60000"
+              conn_expiry_timeout="0"/>
+
+    <!--
+      pbcast.STABLE: Garbage collection of old messages
+      Periodically removes messages that have been received by all members
+    -->
+    <pbcast.STABLE desired_avg_gossip="50000"
+                   max_bytes="4M"/>
+
+    <!--
+      pbcast.GMS: Group Membership Service
+      Manages cluster membership (joining, leaving, etc.)
+    -->
+    <pbcast.GMS print_local_addr="true"
+                join_timeout="3000"
+                view_bundling="true"/>
+
+    <!--
+      UFC: Unicast Flow Control
+      Prevents fast senders from overwhelming slow receivers
+    -->
+    <UFC max_credits="2M"
+         min_threshold="0.4"/>
+
+    <!--
+      MFC: Multicast Flow Control
+      Similar to UFC but for multicast messages
+    -->
+    <MFC max_credits="2M"
+         min_threshold="0.4"/>
+
+    <!--
+      FRAG3: Message fragmentation
+      Splits large messages into smaller fragments for transmission
+    -->
+    <FRAG3 frag_size="60K"/>
+
+    <!--
+      pbcast.STATE_TRANSFER: State transfer protocol
+      Allows new members to get the current state from existing members
+    -->
+    <pbcast.STATE_TRANSFER/>
+
+    <!--
+      pbcast.FLUSH: Ensures message ordering during view changes
+      Flushes pending messages before processing view changes
+    -->
+    <pbcast.FLUSH/>
+</config>

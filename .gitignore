@@ -1,0 +1,32 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Claude Code
+.claude/
+
+# Environment files (contain passwords!)
+.env
+*.env.local
+*.env.bak
+
+# Docker volumes
+postgres-data/
+solr-data/
+xwiki-data/
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# IDE
+.vscode/
+.idea/
+*.iml

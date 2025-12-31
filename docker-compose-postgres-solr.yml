@@ -1,0 +1,196 @@
+# XWiki Docker Compose Configuration
+# PostgreSQL database + Separate Solr search service
+# See: https://github.com/xwiki-contrib/docker-xwiki
+
+version: '3.8'
+
+networks:
+  xwiki-network:
+    driver: bridge
+    name: xwiki-network
+
+volumes:
+  # PostgreSQL data persistence
+  postgres-data:
+    name: xwiki-postgres-data
+
+  # XWiki permanent directory (application data, extensions, etc.)
+  xwiki-data:
+    name: xwiki-data
+
+  # Solr index data persistence
+  solr-data:
+    name: xwiki-solr-data
+
+services:
+  # PostgreSQL Database Service
+  db:
+    image: postgres:17
+    container_name: xwiki-postgres-db
+    restart: unless-stopped
+
+    # Network configuration
+    networks:
+      - xwiki-network
+
+    # Volume mounts for data persistence
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+    # Environment variables for database initialization
+    environment:
+      # Root password for PostgreSQL
+      POSTGRES_ROOT_PASSWORD: ${POSTGRES_ROOT_PASSWORD:-xwiki}
+
+      # XWiki database user
+      POSTGRES_USER: ${POSTGRES_USER:-xwiki}
+
+      # XWiki database password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-xwiki}
+
+      # XWiki database name
+      POSTGRES_DB: ${POSTGRES_DB:-xwiki}
+
+      # PostgreSQL initialization arguments for UTF-8 encoding
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale-provider=builtin --locale=C.UTF-8"
+
+    # Health check to ensure database is ready
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xwiki"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+    # Resource limits (optional - adjust based on your needs)
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 2G
+    #     reservations:
+    #       memory: 1G
+
+  # Apache Solr Search Service
+  solr:
+    image: solr:9
+    container_name: xwiki-solr
+    restart: unless-stopped
+
+    # Network configuration
+    networks:
+      - xwiki-network
+
+    # Volume mounts
+    volumes:
+      # Solr initialization scripts
+      # Note: You need to create this directory and add:
+      # 1. solr-init.sh script
+      # 2. XWiki Solr configuration JAR
+      - ./solr-init:/docker-entrypoint-initdb.d:ro
+
+      # Solr data persistence
+      - solr-data:/opt/solr/server/solr
+
+    # Expose Solr admin UI (optional, for debugging)
+    ports:
+      - "8983:8983"
+
+    # Environment variables
+    environment:
+      # Solr heap size (adjust based on your wiki size)
+      SOLR_HEAP: ${SOLR_HEAP:-512m}
+
+      # Enable Solr authentication (optional, recommended for production)
+      # SOLR_AUTH_TYPE: basic
+      # SOLR_AUTHENTICATION_OPTS: "-Dbasicauth=solr:SolrRocks"
+
+    # Health check to ensure Solr is ready
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8983/solr/xwiki/admin/ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    # Resource limits (optional - adjust based on your needs)
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 1G
+    #     reservations:
+    #       memory: 512M
+
+  # XWiki Web Application Service
+  web:
+    image: xwiki:${XWIKI_VERSION:-stable-postgres-tomcat}
+    container_name: xwiki-web
+    restart: unless-stopped
+
+    # Service dependencies
+    depends_on:
+      db:
+        condition: service_healthy
+      solr:
+        condition: service_healthy
+
+    # Network configuration
+    networks:
+      - xwiki-network
+
+    # Port mapping - XWiki accessible on host port 8080
+    ports:
+      - "${XWIKI_PORT:-8080}:8080"
+
+    # Volume mounts
+    volumes:
+      # XWiki permanent directory for application data
+      - xwiki-data:/usr/local/xwiki
+
+      # Optional: Mount custom configuration files
+      # Uncomment and customize as needed
+      # - ./xwiki-config/xwiki.cfg:/usr/local/tomcat/webapps/ROOT/WEB-INF/xwiki.cfg
+      # - ./xwiki-config/xwiki.properties:/usr/local/tomcat/webapps/ROOT/WEB-INF/xwiki.properties
+      # - ./xwiki-config/hibernate.cfg.xml:/usr/local/tomcat/webapps/ROOT/WEB-INF/hibernate.cfg.xml
+
+    # Environment variables for XWiki configuration
+    environment:
+      # Database connection settings
+      DB_USER: ${POSTGRES_USER:-xwiki}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-xwiki}
+      DB_DATABASE: ${POSTGRES_DB:-xwiki}
+      DB_HOST: xwiki-postgres-db
+
+      # Solr search configuration
+      INDEX_HOST: xwiki-solr
+      INDEX_PORT: 8983
+
+      # Optional: Context path for XWiki deployment
+      # CONTEXT_PATH: ROOT
+
+      # Optional: Custom JDBC parameters
+      # JDBC_PARAMS: "?sslmode=disable"
+
+      # JVM options for Tomcat
+      JAVA_OPTS: >-
+        -Xmx2048m
+        -Xms1024m
+        -XX:+UseG1GC
+        -XX:MaxGCPauseMillis=200
+        -Dfile.encoding=UTF-8
+        -Djava.awt.headless=true
+
+    # Health check to ensure XWiki is responding
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+    # Resource limits (optional - adjust based on your needs)
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 3G
+    #     reservations:
+    #       memory: 2G
