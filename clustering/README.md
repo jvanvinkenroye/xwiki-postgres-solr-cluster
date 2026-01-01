@@ -76,30 +76,40 @@ If you prefer manual setup or need custom configuration:
 # 1. Navigate to clustering directory
 cd clustering/
 
-# 2. Download Solr configuration (artifact type depends on XWiki version)
+# 2. Download official Solr core configurations from Maven
 XWIKI_VERSION="17.10.2"
 
-# For XWiki >= 16.0 (ZIP format - recommended):
-wget -P ../solr-init/ \
+# Create directory for official cores
+mkdir -p solr-cores-official
+cd solr-cores-official
+
+# Download main search core (full XWiki schema)
+curl -L -o search-core.zip \
+  "https://maven.xwiki.org/releases/org/xwiki/platform/xwiki-platform-search-solr-server-core-search/${XWIKI_VERSION}/xwiki-platform-search-solr-server-core-search-${XWIKI_VERSION}.zip"
+
+# Download minimal core configuration (for extension_index, events, ratings)
+curl -L -o minimal-core.zip \
   "https://maven.xwiki.org/releases/org/xwiki/platform/xwiki-platform-search-solr-server-core-minimal/${XWIKI_VERSION}/xwiki-platform-search-solr-server-core-minimal-${XWIKI_VERSION}.zip"
 
-# For older versions < 16.0 (JAR format):
-# wget -P ../solr-init/ \
-#   "https://maven.xwiki.org/releases/org/xwiki/platform/xwiki-platform-search-solr-server-data/${XWIKI_VERSION}/xwiki-platform-search-solr-server-data-${XWIKI_VERSION}.jar"
+# Extract cores
+unzip -q search-core.zip
+unzip -q minimal-core.zip -d minimal
 
-# 3. Set Solr permissions (Linux only - macOS Docker Desktop handles this automatically)
-# sudo chown -R 8983:8983 ../solr-init/
+# Return to clustering directory
+cd ..
 
-# 4. Create environment file
+# 3. Create environment file
 cp .env.example .env
 # Edit .env and change passwords!
 
-# 5. Start the cluster
+# 4. Start the cluster
 docker compose -f docker-compose-cluster.yml up -d
 
-# 6. Monitor startup
+# 5. Monitor startup
 docker compose -f docker-compose-cluster.yml logs -f
 ```
+
+**Note:** The cluster now uses official XWiki Solr core configurations downloaded from Maven, ensuring full compatibility and proper schema management.
 
 ## Access Points
 
@@ -520,6 +530,55 @@ docker run --rm -v xwiki-cluster-data-shared:/data alpine ls -la /data
 docker run --rm -v xwiki-cluster-data-shared:/data alpine chown -R 999:999 /data
 ```
 
+### Solr Core Configuration Issues
+
+**Symptoms:**
+- Solr fails to start with errors about missing token filters (e.g., `stempelPolishStem`)
+- Cores fail to load with schema errors
+- XWiki can't connect to Solr during flavor installation
+
+**Root Causes:**
+1. **Missing analysis-extras module**: XWiki 16.6.0+ requires Solr's `analysis-extras` module for advanced language analyzers
+2. **Incorrect core configurations**: Using minimal schemas instead of official XWiki configurations
+3. **Wrong core naming**: XWiki 16.2.0+ expects `xwiki_search_9` instead of `xwiki`
+
+**Solutions:**
+
+**Enable analysis-extras module** (already configured in docker-compose-cluster.yml):
+```yaml
+environment:
+  SOLR_MODULES: analysis-extras
+```
+
+**Verify all 4 cores are loaded:**
+```bash
+curl -s "http://localhost:8983/solr/admin/cores?action=STATUS" | \
+  python3 -c "import sys, json; data=json.load(sys.stdin); \
+  [print(f'{name}: {info[\"index\"][\"numDocs\"]} docs') for name, info in data['status'].items()]"
+```
+
+**Expected cores for XWiki 16.2.0+:**
+- `xwiki_search_9` - Main search core (full schema)
+- `xwiki_extension_index_9` - Extension management
+- `xwiki_events_9` - Event stream
+- `xwiki_ratings_9` - Page ratings
+
+**Check Solr logs for errors:**
+```bash
+docker logs xwiki-cluster-solr 2>&1 | grep -i "error\|exception"
+```
+
+**Rebuild with official configurations:**
+```bash
+# Stop and remove everything
+docker compose -f docker-compose-cluster.yml down -v
+
+# Download official cores (see Manual Setup section)
+
+# Restart
+docker compose -f docker-compose-cluster.yml up -d
+```
+
 ### High Database Connection Count
 
 ```bash
@@ -694,6 +753,9 @@ Convert to Kubernetes manifests:
   - Includes `solr-init` service (Alpine-based initialization container)
 - `nginx/` - Nginx load balancer configuration
 - `jgroups/tcp.xml` - JGroups cluster communication config
+- `config/xwiki.properties` - XWiki configuration for remote Solr
+- `solr-cores-official/` - Official XWiki Solr core configurations from Maven
+- `SOLR-SETUP.md` - Detailed Solr configuration guide and troubleshooting
 - `SETUP-ANLEITUNG.md` - German setup guide (manual)
 - `CHANGELOG.md` - Version history and changes
 - `MONITORING.md` - Monitoring and troubleshooting guide

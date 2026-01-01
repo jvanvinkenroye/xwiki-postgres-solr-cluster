@@ -2,8 +2,6 @@
 # PostgreSQL + Solr + Multiple XWiki Nodes + Load Balancer
 # See: clustering/README.md for setup instructions
 
-version: '3.8'
-
 networks:
   xwiki-cluster-network:
     driver: bridge
@@ -69,55 +67,62 @@ services:
       - "default_statistics_target=100"
 
   # Solr Initialization Service
-  # Extracts XWiki Solr configuration before Solr starts
+  # Sets up XWiki Solr cores using official configurations from Maven
   solr-init:
     image: alpine:latest
     container_name: xwiki-solr-init
     restart: "no"  # Runs once, then exits
 
     volumes:
-      # Source: XWiki Solr configuration archive (ZIP/JAR)
-      - ../solr-init:/source:ro
+      # Source: Official XWiki Solr core configurations (downloaded from Maven)
+      - ./solr-cores-official:/source:ro
 
       # Target: Shared volume with Solr
       - solr-data:/target
 
-    # Idempotent: Only extracts if core doesn't exist yet
+    # Setup all required Solr cores with official configurations
     command: |
       sh -c '
-        CORE_DIR="/target/data/xwiki"
+        echo "🚀 Setting up XWiki Solr cores with official configurations..."
 
-        # Check if already extracted
-        if [ -d "$$CORE_DIR" ] && [ -f "$$CORE_DIR/core.properties" ]; then
-          echo "✅ Solr core already exists at $$CORE_DIR"
+        # Check if already setup
+        if [ -d "/target/data/xwiki_search_9" ] && [ -f "/target/data/xwiki_search_9/core.properties" ]; then
+          echo "✅ Solr cores already configured"
           exit 0
         fi
 
-        echo "📦 Installing unzip..."
-        apk add --no-cache unzip
+        # Create main search core (xwiki_search_9)
+        echo "📦 Setting up xwiki_search_9 (main search core)..."
+        mkdir -p /target/data/xwiki_search_9
+        cp -r /source/conf /target/data/xwiki_search_9/
+        cp -r /source/lib /target/data/xwiki_search_9/
+        echo "name=xwiki_search_9" > /target/data/xwiki_search_9/core.properties
 
-        echo "📂 Creating core directory..."
-        mkdir -p "$$CORE_DIR"
-
-        echo "📦 Extracting Solr configuration..."
-        cd /source
-        ARCHIVE=$$(find . -type f \( -name "*.zip" -o -name "*.jar" \) | head -1)
-
-        if [ -z "$$ARCHIVE" ]; then
-          echo "❌ ERROR: No Solr configuration archive found in /source!"
-          echo "Expected: xwiki-platform-search-solr-server-*.zip or *.jar"
-          exit 1
+        # Create ConfigSet from search core for dynamic core creation
+        echo "🔧 Creating ConfigSet xwiki..."
+        mkdir -p /target/data/configsets/xwiki
+        cp -r /source/conf /target/data/configsets/xwiki/
+        if [ -d /source/lib ]; then
+          cp -r /source/lib /target/data/configsets/xwiki/
         fi
 
-        echo "Found archive: $$ARCHIVE"
-        unzip -o "$$ARCHIVE" -d "$$CORE_DIR"
+        # Create additional cores with minimal configuration
+        echo "📦 Setting up additional cores (extension_index, events, ratings)..."
+        for core_name in xwiki_extension_index_9 xwiki_events_9 xwiki_ratings_9; do
+          echo "  Creating $$core_name..."
+          mkdir -p /target/data/$$core_name
+          cp -r /source/minimal/conf /target/data/$$core_name/
+          echo "name=$$core_name" > /target/data/$$core_name/core.properties
+        done
 
-        echo "🔧 Setting permissions for Solr user (8983:8983)..."
-        chown -R 8983:8983 "$$CORE_DIR"
+        # Set correct permissions for Solr user (8983:8983)
+        echo "🔧 Setting permissions for Solr user..."
+        chown -R 8983:8983 /target/data
 
-        echo "✅ Solr configuration extracted successfully!"
-        echo "Core structure:"
-        ls -la "$$CORE_DIR"
+        echo "✅ All Solr cores configured successfully!"
+        echo ""
+        echo "Configured cores:"
+        ls -1 /target/data/ | grep xwiki
       '
 
   # Apache Solr Search Service (Shared by all nodes)
@@ -140,6 +145,10 @@ services:
 
     environment:
       SOLR_HEAP: ${SOLR_HEAP:-1g}
+      # Enable analysis-extras module (required for XWiki's advanced language analyzers)
+      SOLR_MODULES: analysis-extras
+      # Set default configSet for new cores
+      SOLR_OPTS: "-Dsolr.configset.default=xwiki"
       # Production: Enable Solr authentication
       # SOLR_AUTH_TYPE: basic
       # SOLR_AUTHENTICATION_OPTS: "-Dbasicauth=solr:SolrRocks"
@@ -149,7 +158,7 @@ services:
       - "8983:8983"
 
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8983/solr/xwiki/admin/ping || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:8983/solr/xwiki_search_9/admin/ping || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -178,8 +187,8 @@ services:
       # JGroups clustering configuration
       - ./jgroups/tcp.xml:/usr/local/tomcat/webapps/ROOT/WEB-INF/observation/remote/jgroups/tcp.xml:ro
 
-      # Optional: Custom configurations
-      # - ./config/xwiki.properties:/usr/local/tomcat/webapps/ROOT/WEB-INF/xwiki.properties:ro
+      # XWiki configuration (required for Solr remote connection)
+      - ./config/xwiki.properties:/usr/local/tomcat/webapps/ROOT/WEB-INF/xwiki.properties
 
     environment:
       # Database connection
@@ -238,6 +247,9 @@ services:
 
       # JGroups clustering configuration
       - ./jgroups/tcp.xml:/usr/local/tomcat/webapps/ROOT/WEB-INF/observation/remote/jgroups/tcp.xml:ro
+
+      # XWiki configuration (required for Solr remote connection)
+      - ./config/xwiki.properties:/usr/local/tomcat/webapps/ROOT/WEB-INF/xwiki.properties
 
     environment:
       DB_USER: ${POSTGRES_USER:-xwiki}
@@ -318,10 +330,10 @@ services:
 #       timeout: 10s
 #       retries: 5
 #       start_period: 120s
-
-    # Optional: Disable this node by default (scale on demand)
-    # profiles:
-    #   - scale
+#
+#     # Optional: Disable this node by default (scale on demand)
+#     # profiles:
+#     #   - scale
 
   # Nginx Load Balancer
   loadbalancer:

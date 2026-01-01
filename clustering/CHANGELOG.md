@@ -2,6 +2,106 @@
 
 Alle wichtigen Änderungen an diesem Projekt werden in dieser Datei dokumentiert.
 
+## [1.3.0] - 2026-01-01
+
+### Geändert - BREAKING: Solr Core-Konfiguration komplett überarbeitet
+
+**Wichtig:** Diese Version verwendet offizielle XWiki Solr-Konfigurationen von Maven statt Custom-Schemas.
+
+#### Neue Solr-Architektur
+- **Offizielle Maven-Artefakte**: Download von xwiki-platform-search-solr-server-core-search und -minimal
+- **4 Pre-konfigurierte Cores**:
+  - `xwiki_search_9` - Haupt-Suchindex (volle XWiki-Schema, ~6MB)
+  - `xwiki_extension_index_9` - Extension-Management (minimal)
+  - `xwiki_events_9` - Event-Stream (minimal)
+  - `xwiki_ratings_9` - Seiten-Bewertungen (minimal)
+- **analysis-extras Modul**: Automatisch aktiviert für erweiterte Sprach-Analyzer
+- **Neues Verzeichnis**: `solr-cores-official/` statt `../solr-init/`
+
+#### Technische Verbesserungen
+- ✅ **Vollständige Schema-Kompatibilität**: Alle benötigten Field Types und Analyzer
+- ✅ **Keine Schema-Konflikte**: Offizielles Schema verhindert _version_ und andere Feldprobleme
+- ✅ **ConfigSet Support**: Dynamische Core-Erstellung via Solr API
+- ✅ **Sprachunterstützung**: Polnisch, Tschechisch, Ungarisch und 30+ weitere Sprachen
+- ✅ **XWiki 16.2.0+ kompatibel**: Neue Core-Naming-Convention
+
+### Hinzugefügt
+- **Neue Dokumentation**: `SOLR-SETUP.md`
+  - Detaillierte Solr-Konfigurationsanleitung
+  - Versions-Kompatibilitätsmatrix
+  - Troubleshooting-Guide
+  - Performance-Tuning-Tipps
+
+- **Umgebungsvariable**: `SOLR_MODULES=analysis-extras`
+  - Aktiviert erweiterte Token-Filter
+  - Erforderlich für XWiki 16.6.0+
+
+- **Healthcheck-Update**: Verwendet `xwiki_search_9` statt veraltetem `xwiki`
+
+### Behoben
+- **Solr Startup-Fehler**: "stempelPolishStem does not exist"
+  - Ursache: Fehlende analysis-extras Module
+  - Lösung: SOLR_MODULES environment variable
+
+- **Schema-Konflikte**: "_version_ is not an indexed field"
+  - Ursache: Falsche Field-Definition in Custom-Schemas
+  - Lösung: Offizielle XWiki-Schemas verwenden
+
+- **Core-Erstellung schlägt fehl**: "Can't find resource 'solrconfig.xml'"
+  - Ursache: XWiki konnte Cores nicht erstellen (fehlende ConfigSet)
+  - Lösung: ConfigSet vorbereitet, Cores pre-created
+
+- **Flavor-Installation scheitert**: Solr nicht erreichbar
+  - Ursache: Cores existierten nicht oder hatten falsches Schema
+  - Lösung: Alle 4 Cores mit offiziellen Configs vorbereitet
+
+### Migration von 1.2.0 zu 1.3.0
+
+```bash
+# 1. Cluster stoppen und Volumes löschen (notwendig!)
+docker compose -f docker-compose-cluster.yml down -v
+
+# 2. Offizielle Solr-Cores herunterladen
+VERSION="17.10.2"
+mkdir -p solr-cores-official
+cd solr-cores-official
+
+# Main Search Core
+curl -L -o search-core.zip \
+  "https://maven.xwiki.org/releases/org/xwiki/platform/xwiki-platform-search-solr-server-core-search/${VERSION}/xwiki-platform-search-solr-server-core-search-${VERSION}.zip"
+
+# Minimal Cores
+curl -L -o minimal-core.zip \
+  "https://maven.xwiki.org/releases/org/xwiki/platform/xwiki-platform-search-solr-server-core-minimal/${VERSION}/xwiki-platform-search-solr-server-core-minimal-${VERSION}.zip"
+
+# Extrahieren
+unzip -q search-core.zip
+unzip -q minimal-core.zip -d minimal
+
+cd ..
+
+# 3. Cluster neu starten
+docker compose -f docker-compose-cluster.yml up -d
+
+# 4. Cores verifizieren
+curl -s "http://localhost:8983/solr/admin/cores?action=STATUS" | \
+  python3 -c "import sys, json; data=json.load(sys.stdin); \
+  [print(f'{name}: OK') for name in data['status'].keys()]"
+```
+
+**Erwartete Ausgabe:**
+```
+xwiki_events_9: OK
+xwiki_extension_index_9: OK
+xwiki_ratings_9: OK
+xwiki_search_9: OK
+```
+
+### Veraltet
+- **Custom Minimal Schemas**: Nicht mehr verwendet
+- **Core-Name "xwiki"**: Ersetzt durch `xwiki_search_9` (XWiki 16.2.0+)
+- **../solr-init/ Verzeichnis**: Ersetzt durch `solr-cores-official/`
+
 ## [1.2.0] - 2025-12-31
 
 ### Geändert
