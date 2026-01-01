@@ -1,0 +1,21 @@
+# Solr cores - downloaded from Maven, should not be committed
+solr-cores-official/
+
+# XWiki configuration backup
+config/xwiki.properties.original
+
+# Environment variables with secrets
+.env
+
+# Docker volumes
+*.log
+
+# macOS
+.DS_Store
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
